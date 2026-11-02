@@ -1,0 +1,29 @@
+# File system cruft
+.DS_Store
+
+# Individual per developer
+.env
+.idea
+.vscode
+phpunit.xml
+.gitpod.yml
+docs/superpowers
+
+# Generated files
+.phpunit.result.cache
+.php-cs-fixer.cache
+phpstan-tmp-dir
+rector-tmp-dir
+proto-tmp
+
+# composer
+composer.phar
+composer.lock
+vendor
+
+# lnai-generated
+.ai/.lnai-manifest.json
+.claude/CLAUDE.md
+.claude/settings.json
+/AGENTS.md
+# end lnai-generated

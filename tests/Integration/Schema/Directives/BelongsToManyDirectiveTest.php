@@ -1,0 +1,642 @@
+<?php declare(strict_types=1);
+
+namespace Tests\Integration\Schema\Directives;
+
+use Illuminate\Support\Arr;
+use Nuwave\Lighthouse\Exceptions\DefinitionException;
+use Tests\DBTestCase;
+use Tests\Utils\Models\Role;
+use Tests\Utils\Models\User;
+
+final class BelongsToManyDirectiveTest extends DBTestCase
+{
+    public function testQueryBelongsToManyRelationship(): void
+    {
+        $this->schema = /** @lang GraphQL */ <<<'GRAPHQL'
+        type User {
+            roles: [Role!]! @belongsToMany
+        }
+
+        type Role {
+            id: ID!
+        }
+
+        type Query {
+            user: User! @auth
+        }
+        GRAPHQL;
+
+        $user = factory(User::class)->create();
+        $this->assertInstanceOf(User::class, $user);
+        $this->be($user);
+
+        $rolesCount = 2;
+        $roles = factory(Role::class, $rolesCount)->create();
+        $user->roles()->attach($roles);
+
+        $this->graphQL(/** @lang GraphQL */ <<<'GRAPHQL'
+        {
+            user {
+                roles {
+                    id
+                }
+            }
+        }
+        GRAPHQL)->assertJsonCount($rolesCount, 'data.user.roles');
+    }
+
+    public function testNameRelationExplicitly(): void
+    {
+        $this->schema = /** @lang GraphQL */ <<<'GRAPHQL'
+        type User {
+            foo: [Role!] @belongsToMany(relation: "roles")
+        }
+
+        type Role {
+            id: ID!
+        }
+
+        type Query {
+            user: User! @auth
+        }
+        GRAPHQL;
+
+        $user = factory(User::class)->create();
+        $this->assertInstanceOf(User::class, $user);
+        $this->be($user);
+
+        $rolesCount = 2;
+        $roles = factory(Role::class, $rolesCount)->create();
+        $user->roles()->attach($roles);
+
+        $this->graphQL(/** @lang GraphQL */ <<<'GRAPHQL'
+        {
+            user {
+                foo {
+                    id
+                }
+            }
+        }
+        GRAPHQL)->assertJsonCount($rolesCount, 'data.user.foo');
+    }
+
+    public function testQueryBelongsToManyPaginator(): void
+    {
+        $this->schema = /** @lang GraphQL */ <<<'GRAPHQL'
+        type User {
+            rolesPaginated: [Role!]! @belongsToMany(type: PAGINATOR, relation: "roles")
+            rolesSimplePaginated: [Role!]! @belongsToMany(type: SIMPLE, relation: "roles")
+        }
+
+        type Role {
+            id: ID!
+        }
+
+        type Query {
+            user: User! @auth
+        }
+        GRAPHQL;
+
+        $user = factory(User::class)->create();
+        $this->assertInstanceOf(User::class, $user);
+        $this->be($user);
+
+        $rolesCount = 4;
+        $roles = factory(Role::class, $rolesCount)->create();
+        $user->roles()->attach($roles);
+
+        $this
+            ->graphQL(/** @lang GraphQL */ <<<'GRAPHQL'
+            {
+                user {
+                    rolesPaginated(first: 2) {
+                        paginatorInfo {
+                            count
+                            hasMorePages
+                            total
+                        }
+                        data {
+                            id
+                        }
+                    }
+                    rolesSimplePaginated(first: 3) {
+                        paginatorInfo {
+                            count
+                        }
+                        data {
+                            id
+                        }
+                    }
+                }
+            }
+            GRAPHQL)
+            ->assertJson([
+                'data' => [
+                    'user' => [
+                        'rolesPaginated' => [
+                            'paginatorInfo' => [
+                                'count' => 2,
+                                'hasMorePages' => true,
+                                'total' => $rolesCount,
+                            ],
+                        ],
+                        'rolesSimplePaginated' => [
+                            'paginatorInfo' => [
+                                'count' => 3,
+                            ],
+                        ],
+                    ],
+                ],
+            ])
+            ->assertJsonCount(2, 'data.user.rolesPaginated.data')
+            ->assertJsonCount(3, 'data.user.rolesSimplePaginated.data');
+    }
+
+    public function testQueryBelongsToManyRelayConnection(): void
+    {
+        $this->schema = /** @lang GraphQL */ <<<'GRAPHQL'
+        type User {
+            roles: [Role!]! @belongsToMany(type: CONNECTION)
+        }
+
+        type Role {
+            id: ID!
+        }
+
+        type Query {
+            user: User! @auth
+        }
+        GRAPHQL;
+
+        $user = factory(User::class)->create();
+        $this->assertInstanceOf(User::class, $user);
+        $this->be($user);
+
+        $roles = factory(Role::class, 3)->create();
+        $user->roles()->attach($roles);
+
+        $this->graphQL(/** @lang GraphQL */ <<<'GRAPHQL'
+        {
+            user {
+                roles(first: 2) {
+                    pageInfo {
+                        hasNextPage
+                    }
+                    edges {
+                        node {
+                            id
+                        }
+                    }
+                }
+            }
+        }
+        GRAPHQL)->assertJson([
+            'data' => [
+                'user' => [
+                    'roles' => [
+                        'pageInfo' => [
+                            'hasNextPage' => true,
+                        ],
+                    ],
+                ],
+            ],
+        ])->assertJsonCount(2, 'data.user.roles.edges');
+    }
+
+    public function testQueryBelongsToManyRelayConnectionWithCustomEdgeUsingDirective(): void
+    {
+        $this->schema = /** @lang GraphQL */ <<<'GRAPHQL'
+        type User {
+            roles: [Role!]! @belongsToMany(type: CONNECTION, edgeType: "CustomRoleEdge")
+        }
+
+        type Role {
+            id: ID!
+        }
+
+        type CustomRoleEdge {
+            node: Role!
+            cursor: String!
+            meta: String
+        }
+
+        type Query {
+            user: User! @auth
+        }
+        GRAPHQL;
+
+        $user = factory(User::class)->create();
+        $this->assertInstanceOf(User::class, $user);
+        $this->be($user);
+
+        $roles = factory(Role::class, 3)->create();
+        $meta = ['meta' => 'new'];
+        $user->roles()->attach($roles, $meta);
+
+        $this->graphQL(/** @lang GraphQL */ <<<'GRAPHQL'
+        {
+            user {
+                roles(first: 2) {
+                    edges {
+                        meta
+                        node {
+                            id
+                        }
+                    }
+                }
+            }
+        }
+        GRAPHQL)->assertJson([
+            'data' => [
+                'user' => [
+                    'roles' => [
+                        'edges' => [
+                            $meta,
+                        ],
+                    ],
+                ],
+            ],
+        ])->assertJsonCount(2, 'data.user.roles.edges');
+    }
+
+    public function testQueryBelongsToManyRelayConnectionWithCustomEdgeHavingPivotFieldUsingDirective(): void
+    {
+        $this->schema = /** @lang GraphQL */ <<<'GRAPHQL'
+        type User {
+            roles: [Role!]! @belongsToMany(type: CONNECTION, edgeType: "UserRoleEdge")
+        }
+
+        type Role {
+            id: ID!
+        }
+
+        type UserRole {
+            meta: String
+        }
+
+        type UserRoleEdge {
+            node: Role!
+            cursor: String!
+            pivot: UserRole
+        }
+
+        type Query {
+            user: User! @auth
+        }
+        GRAPHQL;
+
+        $user = factory(User::class)->create();
+        $this->assertInstanceOf(User::class, $user);
+        $this->be($user);
+
+        $roles = factory(Role::class, 3)->create();
+        $meta = ['meta' => 'new'];
+        $user->roles()->attach($roles, $meta);
+
+        $this->graphQL(/** @lang GraphQL */ <<<'GRAPHQL'
+        {
+            user {
+                roles(first: 2) {
+                    edges {
+                        pivot {
+                            meta
+                        }
+                        node {
+                            id
+                        }
+                    }
+                }
+            }
+        }
+        GRAPHQL)->assertJsonPath('data.user.roles.edges.*.pivot', array_fill(0, 2, $meta))
+            ->assertJsonCount(2, 'data.user.roles.edges');
+    }
+
+    public function testQueryBelongsToManyPivot(): void
+    {
+        $this->schema = /** @lang GraphQL */ <<<'GRAPHQL'
+        type User {
+            roles: [Role!]! @belongsToMany
+        }
+
+        type Role {
+            id: ID!
+            pivot: RoleUserPivot
+        }
+
+        type RoleUserPivot {
+            meta: String
+        }
+
+        type Query {
+            user: User! @auth
+        }
+        GRAPHQL;
+
+        $user = factory(User::class)->create();
+        $this->assertInstanceOf(User::class, $user);
+        $this->be($user);
+
+        $rolesCount = 2;
+        $roles = factory(Role::class, $rolesCount)->create();
+        $meta = ['meta' => 'new'];
+        $user->roles()->attach($roles, $meta);
+
+        $this->graphQL(/** @lang GraphQL */ <<<'GRAPHQL'
+        {
+            user {
+                roles {
+                    id
+                    pivot {
+                        meta
+                    }
+                }
+            }
+        }
+        GRAPHQL)->assertJson([
+            'data' => [
+                'user' => [
+                    'roles' => [
+                        [
+                            'pivot' => $meta,
+                        ],
+                    ],
+                ],
+            ],
+        ])->assertJsonCount($rolesCount, 'data.user.roles');
+    }
+
+    public function testThrowsExceptionForInvalidEdgeTypeFromDirective(): void
+    {
+        $this->expectExceptionObject(new DefinitionException(
+            'The `edgeType` argument of @belongsToMany on roles must reference an existing object type definition.',
+        ));
+        $this->buildSchemaWithPlaceholderQuery(/** @lang GraphQL */ <<<'GRAPHQL'
+        type User {
+            roles: [Role!]! @belongsToMany(type: CONNECTION, edgeType: "CustomRoleEdge")
+        }
+
+        type Role {
+            id: ID!
+        }
+        GRAPHQL);
+    }
+
+    public function testQueryBelongsToManyRelayConnectionWithCustomMagicEdge(): void
+    {
+        $this->schema = /** @lang GraphQL */ <<<'GRAPHQL'
+        type User {
+            roles: [Role!]! @belongsToMany(type: CONNECTION)
+        }
+
+        type Role {
+            id: ID!
+        }
+
+        type RoleEdge {
+            node: Role!
+            cursor: String!
+            meta: String
+        }
+
+        type Query {
+            user: User! @auth
+        }
+        GRAPHQL;
+
+        $user = factory(User::class)->create();
+        $this->assertInstanceOf(User::class, $user);
+        $this->be($user);
+
+        $roles = factory(Role::class, 3)->create();
+        $meta = ['meta' => 'new'];
+        $user->roles()->attach($roles, $meta);
+
+        $this->graphQL(/** @lang GraphQL */ <<<'GRAPHQL'
+        {
+            user {
+                roles(first: 2) {
+                    edges {
+                        meta
+                        node {
+                            id
+                        }
+                    }
+                }
+            }
+        }
+        GRAPHQL)->assertJson([
+            'data' => [
+                'user' => [
+                    'roles' => [
+                        'edges' => [
+                            $meta,
+                        ],
+                    ],
+                ],
+            ],
+        ])->assertJsonCount(2, 'data.user.roles.edges');
+    }
+
+    public function testQueryPaginatedBelongsToManyWithDuplicates(): void
+    {
+        $this->schema = /** @lang GraphQL */ <<<'GRAPHQL'
+        type Query {
+            users: [User]! @all
+        }
+
+        type User {
+            id: ID!
+            roles: [Role!]! @belongsToMany(type: SIMPLE)
+        }
+
+        type Role {
+            id: ID!
+        }
+        GRAPHQL;
+
+        $roles = factory(Role::class, 2)->create();
+
+        $users = factory(User::class, 2)->create();
+        foreach ($users as $user) {
+            $this->assertInstanceOf(User::class, $user);
+            $user->roles()->attach($roles);
+        }
+
+        $roleIDs = $roles
+            ->map(static fn (Role $role): array => ['id' => (string) $role->id])
+            ->all();
+
+        $this->graphQL(/** @lang GraphQL */ <<<'GRAPHQL'
+        {
+            users {
+                id
+                roles(first: 2) {
+                    data {
+                        id
+                    }
+                }
+            }
+        }
+        GRAPHQL)->assertJson([
+            'data' => [
+                'users' => $users
+                    ->map(static fn (User $user): array => [
+                        'id' => (string) $user->id,
+                        'roles' => [
+                            'data' => $roleIDs,
+                        ],
+                    ])
+                    ->all(),
+            ],
+        ]);
+    }
+
+    public function testQueryPaginatedBelongsToManyWithDuplicatesUtf8Collision(): void
+    {
+        $this->schema = /** @lang GraphQL */ <<<'GRAPHQL'
+        type Query {
+            users: [User]! @all
+        }
+
+        type User {
+            id: ID!
+            roles: [Role!]! @belongsToMany(type: SIMPLE)
+        }
+
+        type Role {
+            id: ID!
+        }
+        GRAPHQL;
+
+        $role1 = factory(Role::class)->create([
+            'bytes' => "\xE9",
+        ]);
+        $role2 = factory(Role::class)->create([
+            'bytes' => "\xC3\xA9",
+        ]);
+
+        $users = factory(User::class, 2)->create();
+        foreach ($users as $user) {
+            $this->assertInstanceOf(User::class, $user);
+            $user->roles()->attach($role1);
+            $user->roles()->attach($role2);
+        }
+
+        $roleIDs = [
+            ['id' => (string) $role1->id],
+            ['id' => (string) $role2->id],
+        ];
+
+        $this->graphQL(/** @lang GraphQL */ <<<'GRAPHQL'
+        {
+            users {
+                id
+                roles(first: 2) {
+                    data {
+                        id
+                    }
+                }
+            }
+        }
+        GRAPHQL)->assertJson([
+            'data' => [
+                'users' => $users
+                    ->map(static fn (User $user): array => [
+                        'id' => (string) $user->id,
+                        'roles' => [
+                            'data' => $roleIDs,
+                        ],
+                    ])
+                    ->all(),
+            ],
+        ]);
+    }
+
+    public function testQueryBelongsToManyNestedRelationships(): void
+    {
+        $this->schema = /** @lang GraphQL */ <<<'GRAPHQL'
+        type User {
+            id: ID!
+            roles: [Role!]! @belongsToMany(type: CONNECTION)
+        }
+
+        type Role {
+            id: ID!
+            acl: ACL @belongsTo
+            users: [User!]! @belongsToMany
+        }
+
+        type ACL {
+            id: ID!
+        }
+
+        type Query {
+            user: User! @auth
+        }
+        GRAPHQL;
+
+        $user = factory(User::class)->create();
+        $this->assertInstanceOf(User::class, $user);
+        $this->be($user);
+
+        $roles = factory(Role::class, 3)->create();
+        $user->roles()->attach($roles);
+
+        $result = $this->graphQL(/** @lang GraphQL */ <<<'GRAPHQL'
+        {
+            user {
+                roles(first: 2) {
+                    pageInfo {
+                        hasNextPage
+                    }
+                    edges {
+                        node {
+                            id
+                            acl {
+                                id
+                            }
+                            users {
+                                id
+                                roles(first: 2) {
+                                    edges {
+                                        node {
+                                            id
+                                            acl {
+                                                id
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        GRAPHQL);
+
+        $this->assertTrue($result->json('data.user.roles.pageInfo.hasNextPage'));
+
+        $userRolesEdges = $result->json('data.user.roles.edges');
+        $nestedUserRolesEdges = $result->json('data.user.roles.edges.0.node.users.0.roles.edges');
+        $this->assertCount(2, $userRolesEdges);
+        $this->assertCount(2, $nestedUserRolesEdges);
+        $this->assertSame(Arr::get($userRolesEdges, 'node.0.acl.id'), Arr::get($nestedUserRolesEdges, 'node.0.acl.id'));
+        $this->assertSame(Arr::get($userRolesEdges, 'node.1.acl.id'), Arr::get($nestedUserRolesEdges, 'node.1.acl.id'));
+    }
+
+    public function testThrowsErrorWithUnknownTypeArg(): void
+    {
+        $this->expectExceptionObject(new DefinitionException('Found invalid pagination type: foo'));
+        $this->buildSchemaWithPlaceholderQuery(/** @lang GraphQL */ <<<'GRAPHQL'
+        type User {
+            roles(first: Int! after: Int): [Role!]! @belongsToMany(type: "foo")
+        }
+
+        type Role {
+            id: ID!
+        }
+        GRAPHQL);
+    }
+}
